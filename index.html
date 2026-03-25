@@ -700,30 +700,45 @@ async function fetchBetmgmColoradoScrape() {
 
   const fetchWorkerPayloads = async (action) => {
     const attempts = [];
-
     const getUrl = new URL(workerUrl);
     getUrl.searchParams.set('action', action);
-    attempts.push(fetch(getUrl.toString(), { method: 'GET' }));
-
-    attempts.push(fetch(workerUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action })
-    }));
-
-    attempts.push(fetch(workerUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ action }).toString()
-    }));
+    attempts.push({ label: `GET ?action=${action}`, url: getUrl.toString(), init: { method: 'GET' } });
+    attempts.push({
+      label: `POST JSON action=${action}`,
+      url: workerUrl,
+      init: {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
+      }
+    });
+    attempts.push({
+      label: `POST FORM action=${action}`,
+      url: workerUrl,
+      init: {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ action }).toString()
+      }
+    });
 
     const payloads = [];
     for (const attempt of attempts) {
       try {
-        const res = await attempt;
-        if (!res.ok) continue;
-        payloads.push(await res.json());
-      } catch (_) {}
+        const res = await fetch(attempt.url, attempt.init);
+        const rawText = await res.text();
+        if (!res.ok) {
+          log(`co.betmgm scrape request failed [${attempt.label}] status=${res.status}. Body: ${(rawText || '').slice(0, 180)}`, 'error');
+          continue;
+        }
+        try {
+          payloads.push(JSON.parse(rawText));
+        } catch (jsonErr) {
+          log(`co.betmgm scrape JSON parse failed [${attempt.label}]: ${jsonErr.message}. Body: ${(rawText || '').slice(0, 180)}`, 'error');
+        }
+      } catch (reqErr) {
+        log(`co.betmgm scrape request error [${attempt.label}]: ${reqErr.message}`, 'error');
+      }
     }
     return payloads;
   };
@@ -737,6 +752,10 @@ async function fetchBetmgmColoradoScrape() {
         if (normalized.length > 0) {
           log(`Loaded co.betmgm scrape using worker action: ${action}.`, 'info');
           return normalized;
+        }
+        const payloadError = payload?.error || payload?.message || payload?.code || payload?.statusText || '';
+        if (payloadError || events.length === 0) {
+          log(`co.betmgm action ${action} returned no usable events. code/message: ${payloadError || 'none'}. rawEvents=${events.length}.`, 'error');
         }
       }
     }
@@ -758,28 +777,56 @@ async function fetchScrapedBookmakerFallback(eventId, requestedBooks = SCRAPE_FA
     url.searchParams.set('books', requestedBooks.join(','));
 
     const requests = [
-      fetch(url.toString(), { method: 'GET' }),
-      fetch(workerUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'scrape_hr_props', eventId, books: requestedBooks.join(',') })
-      }),
-      fetch(workerUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ action: 'scrape_hr_props', eventId, books: requestedBooks.join(',') }).toString()
-      })
+      {
+        label: `GET scrape_hr_props event=${eventId}`,
+        url: url.toString(),
+        init: { method: 'GET' }
+      },
+      {
+        label: `POST JSON scrape_hr_props event=${eventId}`,
+        url: workerUrl,
+        init: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'scrape_hr_props', eventId, books: requestedBooks.join(',') })
+        }
+      },
+      {
+        label: `POST FORM scrape_hr_props event=${eventId}`,
+        url: workerUrl,
+        init: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ action: 'scrape_hr_props', eventId, books: requestedBooks.join(',') }).toString()
+        }
+      }
     ];
 
     let books = [];
     for (const req of requests) {
       try {
-        const res = await req;
-        if (!res.ok) continue;
-        const payload = await res.json();
+        const res = await fetch(req.url, req.init);
+        const rawText = await res.text();
+        if (!res.ok) {
+          log(`scrape_hr_props request failed [${req.label}] status=${res.status}. Body: ${(rawText || '').slice(0, 180)}`, 'error');
+          continue;
+        }
+        let payload = {};
+        try {
+          payload = JSON.parse(rawText);
+        } catch (jsonErr) {
+          log(`scrape_hr_props JSON parse failed [${req.label}]: ${jsonErr.message}. Body: ${(rawText || '').slice(0, 180)}`, 'error');
+          continue;
+        }
         books = Array.isArray(payload?.bookmakers) ? payload.bookmakers : [];
+        if (!books.length) {
+          const payloadError = payload?.error || payload?.message || payload?.code || payload?.statusText || '';
+          log(`scrape_hr_props returned 0 books [${req.label}] for books=${requestedBooks.join(',')}. code/message: ${payloadError || 'none'}.`, 'error');
+        }
         if (books.length > 0) break;
-      } catch (_) {}
+      } catch (reqErr) {
+        log(`scrape_hr_props request error [${req.label}]: ${reqErr.message}`, 'error');
+      }
     }
     if (!books.length) return [];
     const requestedBookKeys = new Set(requestedBooks.map(book => normalizeBookKey({ key: book, title: book })));
