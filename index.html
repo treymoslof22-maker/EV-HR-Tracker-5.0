@@ -555,11 +555,28 @@ function isHomeRunMarket(market) {
   const key = `${market?.key || ''}`.toLowerCase();
   if (HR_MARKET_KEYS.includes(key)) return true;
 
-  const text = `${market?.key || ''} ${market?.title || ''} ${market?.name || ''} ${market?.description || ''}`.toLowerCase();
+  const text = `${market?.key || ''} ${market?.title || ''} ${market?.name || ''} ${market?.description || ''} ${market?.label || ''} ${market?.marketName || ''} ${market?.market_name || ''} ${market?.type || ''}`.toLowerCase();
   if (!text) return false;
   if (/\bteam\s+home\s*runs?\b/.test(text)) return false;
 
   return HOME_RUN_MARKET_PATTERNS.some(re => re.test(text));
+}
+
+function parseAmericanPrice(outcome) {
+  const candidates = [
+    outcome?.price,
+    outcome?.odds,
+    outcome?.americanOdds,
+    outcome?.american_odds,
+    outcome?.line,
+    outcome?.value
+  ];
+  for (const raw of candidates) {
+    if (raw === null || raw === undefined || raw === '') continue;
+    const num = parseFloat(`${raw}`.replace(/[^0-9+\-.]/g, ''));
+    if (Number.isFinite(num)) return num;
+  }
+  return NaN;
 }
 
 function cfg(id) { return document.getElementById(id).value.trim(); }
@@ -660,18 +677,17 @@ async function fetchBetmgmColoradoScrape() {
             key: 'betmgm',
             title: book.title || 'BetMGM Colorado',
             markets: (book.markets || [])
-              .filter(isHomeRunMarket)
               .map(m => ({
-                key: m.key,
+                key: m.key || m.market_key || m.marketKey || m.name || m.title || 'home_runs',
                 outcomes: (m.outcomes || []).map(o => ({
-                  name: o.name,
-                  description: o.description,
-                  participant: o.participant,
+                  name: o.name || o.label || o.outcome || '',
+                  description: o.description || o.player || o.participant || '',
+                  participant: o.participant || o.player || o.description || '',
                   point: Number.isFinite(parseFloat(o.point)) ? parseFloat(o.point) : null,
-                  price: parseFloat(o.price)
+                  price: parseAmericanPrice(o)
                 })).filter(o => Number.isFinite(o.price) && isSingleHomeRunOutcome(o))
               }))
-              .filter(m => m.outcomes.length > 0)
+              .filter(m => isHomeRunMarket(m) && m.outcomes.length > 0)
           }))
       }))
       .filter(event => event.bookmakers.length > 0);
@@ -702,18 +718,17 @@ async function fetchScrapedBookmakerFallback(eventId) {
         key: normalizeBookKey(book),
         title: book.title || book.key,
         markets: (book.markets || [])
-          .filter(isHomeRunMarket)
           .map(m => ({
-            key: m.key,
+            key: m.key || m.market_key || m.marketKey || m.name || m.title || 'home_runs',
             outcomes: (m.outcomes || []).map(o => ({
-              name: o.name,
-              description: o.description,
-              participant: o.participant,
+              name: o.name || o.label || o.outcome || '',
+              description: o.description || o.player || o.participant || '',
+              participant: o.participant || o.player || o.description || '',
               point: Number.isFinite(parseFloat(o.point)) ? parseFloat(o.point) : null,
-              price: parseFloat(o.price)
+              price: parseAmericanPrice(o)
             })).filter(o => Number.isFinite(o.price) && isSingleHomeRunOutcome(o))
           }))
-          .filter(m => m.outcomes.length > 0)
+          .filter(m => isHomeRunMarket(m) && m.outcomes.length > 0)
       }))
       .filter(book => book.markets.length > 0);
   } catch (e) {
