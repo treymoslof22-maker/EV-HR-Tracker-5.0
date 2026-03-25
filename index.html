@@ -657,16 +657,14 @@ async function fetchBetmgmColoradoScrape() {
   const workerUrl = cfg('cfg-worker-url') || CLOUDFLARE_WORKER_URL;
   if (!workerUrl) return [];
 
-  const url = new URL(workerUrl);
-  url.searchParams.set('action', 'scrape_betmgm_co_hr');
+  const actionCandidates = [
+    'scrape_betmgm_co_hr',
+    'scrape_betmgm_co',
+    'scrape_betmgm_hr',
+    'scrape_betmgm'
+  ];
 
-  try {
-    const res = await fetch(url.toString());
-    if (!res.ok) return [];
-    const payload = await res.json();
-    const events = Array.isArray(payload?.events) ? payload.events : [];
-
-    return events
+  const normalizeScrapedEvents = (events = []) => events
       .map(event => ({
         id: event.id || `${event.away_team || 'away'}-${event.home_team || 'home'}`,
         away_team: event.away_team,
@@ -691,6 +689,31 @@ async function fetchBetmgmColoradoScrape() {
           }))
       }))
       .filter(event => event.bookmakers.length > 0);
+
+  try {
+    for (const action of actionCandidates) {
+      const url = new URL(workerUrl);
+      url.searchParams.set('action', action);
+
+      const res = await fetch(url.toString());
+      if (!res.ok) continue;
+
+      const payload = await res.json();
+      const events = Array.isArray(payload?.events)
+        ? payload.events
+        : Array.isArray(payload?.data)
+          ? payload.data
+          : Array.isArray(payload)
+            ? payload
+            : [];
+
+      const normalized = normalizeScrapedEvents(events);
+      if (normalized.length > 0) {
+        log(`Loaded co.betmgm scrape using worker action: ${action}.`, 'info');
+        return normalized;
+      }
+    }
+    return [];
   } catch (e) {
     log(`BetMGM CO scrape failed: ${e.message}`, 'error');
     return [];
@@ -783,8 +806,13 @@ async function fetchHROdds() {
     let scrapedMatch = betmgmScrapeByMatchup.get(matchupKey(eventOdds.away_team, eventOdds.home_team));
     if (!scrapedMatch) {
       scrapedMatch = scrapedBetmgmEvents.find(scraped =>
-        teamsRoughlyMatch(scraped.away_team, eventOdds.away_team) &&
-        teamsRoughlyMatch(scraped.home_team, eventOdds.home_team)
+        (
+          teamsRoughlyMatch(scraped.away_team, eventOdds.away_team) &&
+          teamsRoughlyMatch(scraped.home_team, eventOdds.home_team)
+        ) || (
+          teamsRoughlyMatch(scraped.away_team, eventOdds.home_team) &&
+          teamsRoughlyMatch(scraped.home_team, eventOdds.away_team)
+        )
       );
       if (scrapedMatch) {
         log(`Matched co.betmgm scrape via fuzzy team names for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
@@ -814,6 +842,15 @@ async function fetchHROdds() {
     }
 
     await sleep(120);
+  }
+
+  if (scrapedBetmgmEvents.length > 0) {
+    const existingMatchups = new Set(eventOddsPayloads.map(e => matchupKey(e.away_team, e.home_team)));
+    const unmatchedScraped = scrapedBetmgmEvents.filter(e => !existingMatchups.has(matchupKey(e.away_team, e.home_team)));
+    if (unmatchedScraped.length > 0) {
+      eventOddsPayloads.push(...unmatchedScraped);
+      log(`Added ${unmatchedScraped.length} unmatched co.betmgm scraped event(s) directly.`, 'info');
+    }
   }
 
   if (eventOddsPayloads.length === 0 && scrapedBetmgmEvents.length > 0) {
