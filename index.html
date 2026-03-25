@@ -690,27 +690,54 @@ async function fetchBetmgmColoradoScrape() {
       }))
       .filter(event => event.bookmakers.length > 0);
 
+  const parsePayloadEvents = (payload) => Array.isArray(payload?.events)
+    ? payload.events
+    : Array.isArray(payload?.data)
+      ? payload.data
+      : Array.isArray(payload)
+        ? payload
+        : [];
+
+  const fetchWorkerPayloads = async (action) => {
+    const attempts = [];
+
+    const getUrl = new URL(workerUrl);
+    getUrl.searchParams.set('action', action);
+    attempts.push(fetch(getUrl.toString(), { method: 'GET' }));
+
+    attempts.push(fetch(workerUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action })
+    }));
+
+    attempts.push(fetch(workerUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ action }).toString()
+    }));
+
+    const payloads = [];
+    for (const attempt of attempts) {
+      try {
+        const res = await attempt;
+        if (!res.ok) continue;
+        payloads.push(await res.json());
+      } catch (_) {}
+    }
+    return payloads;
+  };
+
   try {
     for (const action of actionCandidates) {
-      const url = new URL(workerUrl);
-      url.searchParams.set('action', action);
-
-      const res = await fetch(url.toString());
-      if (!res.ok) continue;
-
-      const payload = await res.json();
-      const events = Array.isArray(payload?.events)
-        ? payload.events
-        : Array.isArray(payload?.data)
-          ? payload.data
-          : Array.isArray(payload)
-            ? payload
-            : [];
-
-      const normalized = normalizeScrapedEvents(events);
-      if (normalized.length > 0) {
-        log(`Loaded co.betmgm scrape using worker action: ${action}.`, 'info');
-        return normalized;
+      const payloads = await fetchWorkerPayloads(action);
+      for (const payload of payloads) {
+        const events = parsePayloadEvents(payload);
+        const normalized = normalizeScrapedEvents(events);
+        if (normalized.length > 0) {
+          log(`Loaded co.betmgm scrape using worker action: ${action}.`, 'info');
+          return normalized;
+        }
       }
     }
     return [];
@@ -724,16 +751,37 @@ async function fetchScrapedBookmakerFallback(eventId, requestedBooks = SCRAPE_FA
   const workerUrl = cfg('cfg-worker-url') || CLOUDFLARE_WORKER_URL;
   if (!workerUrl) return [];
 
-  const url = new URL(workerUrl);
-  url.searchParams.set('action', 'scrape_hr_props');
-  url.searchParams.set('eventId', eventId);
-  url.searchParams.set('books', requestedBooks.join(','));
-
   try {
-    const res = await fetch(url.toString());
-    if (!res.ok) return [];
-    const payload = await res.json();
-    const books = Array.isArray(payload?.bookmakers) ? payload.bookmakers : [];
+    const url = new URL(workerUrl);
+    url.searchParams.set('action', 'scrape_hr_props');
+    url.searchParams.set('eventId', eventId);
+    url.searchParams.set('books', requestedBooks.join(','));
+
+    const requests = [
+      fetch(url.toString(), { method: 'GET' }),
+      fetch(workerUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'scrape_hr_props', eventId, books: requestedBooks.join(',') })
+      }),
+      fetch(workerUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ action: 'scrape_hr_props', eventId, books: requestedBooks.join(',') }).toString()
+      })
+    ];
+
+    let books = [];
+    for (const req of requests) {
+      try {
+        const res = await req;
+        if (!res.ok) continue;
+        const payload = await res.json();
+        books = Array.isArray(payload?.bookmakers) ? payload.bookmakers : [];
+        if (books.length > 0) break;
+      } catch (_) {}
+    }
+    if (!books.length) return [];
     const requestedBookKeys = new Set(requestedBooks.map(book => normalizeBookKey({ key: book, title: book })));
 
     return books
