@@ -720,23 +720,24 @@ async function fetchBetmgmColoradoScrape() {
   }
 }
 
-async function fetchScrapedBookmakerFallback(eventId) {
+async function fetchScrapedBookmakerFallback(eventId, requestedBooks = SCRAPE_FALLBACK_BOOKMAKERS) {
   const workerUrl = cfg('cfg-worker-url') || CLOUDFLARE_WORKER_URL;
   if (!workerUrl) return [];
 
   const url = new URL(workerUrl);
   url.searchParams.set('action', 'scrape_hr_props');
   url.searchParams.set('eventId', eventId);
-  url.searchParams.set('books', SCRAPE_FALLBACK_BOOKMAKERS.join(','));
+  url.searchParams.set('books', requestedBooks.join(','));
 
   try {
     const res = await fetch(url.toString());
     if (!res.ok) return [];
     const payload = await res.json();
     const books = Array.isArray(payload?.bookmakers) ? payload.bookmakers : [];
+    const requestedBookKeys = new Set(requestedBooks.map(book => normalizeBookKey({ key: book, title: book })));
 
     return books
-      .filter(book => SCRAPE_FALLBACK_BOOKMAKERS.includes(normalizeBookKey(book)))
+      .filter(book => requestedBookKeys.has(normalizeBookKey(book)))
       .map(book => ({
         key: normalizeBookKey(book),
         title: book.title || book.key,
@@ -821,9 +822,15 @@ async function fetchHROdds() {
     if (scrapedMatch?.bookmakers?.length) {
       eventOdds.bookmakers = [...eventOdds.bookmakers, ...scrapedMatch.bookmakers];
       log(`Using co.betmgm scraped odds for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
-    } else if (apiBetmgmBook) {
-      eventOdds.bookmakers.push(apiBetmgmBook);
-      log(`co.betmgm scrape unavailable; using Odds API BetMGM for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
+    } else {
+      const scrapedBetmgmFallback = await fetchScrapedBookmakerFallback(event.id, ['betmgm', 'co.betmgm', 'betmgm_co']);
+      if (scrapedBetmgmFallback.length > 0) {
+        eventOdds.bookmakers = [...eventOdds.bookmakers, ...scrapedBetmgmFallback];
+        log(`Using scrape_hr_props BetMGM fallback for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
+      } else if (apiBetmgmBook) {
+        eventOdds.bookmakers.push(apiBetmgmBook);
+        log(`co.betmgm scrape unavailable; using Odds API BetMGM for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
+      }
     }
 
     const missingFallbackBooks = SCRAPE_FALLBACK_BOOKMAKERS.filter(bookKey =>
