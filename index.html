@@ -522,6 +522,17 @@ function matchupKey(awayTeam, homeTeam) {
   return `${(awayTeam || '').toLowerCase().trim()}@@${(homeTeam || '').toLowerCase().trim()}`;
 }
 
+function normalizeTeamName(name) {
+  return (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function teamsRoughlyMatch(a, b) {
+  const na = normalizeTeamName(a);
+  const nb = normalizeTeamName(b);
+  if (!na || !nb) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+
 function isSingleHomeRunOutcome(outcome) {
   const point = parseFloat(outcome?.point);
   if (Number.isFinite(point)) return point <= 0.5;
@@ -733,7 +744,16 @@ async function fetchHROdds() {
     const nonBetmgmApiBooks = (eventOdds.bookmakers || []).filter(b => normalizeBookKey(b) !== 'betmgm');
     eventOdds.bookmakers = nonBetmgmApiBooks.filter(isTrackedBook);
 
-    const scrapedMatch = betmgmScrapeByMatchup.get(matchupKey(eventOdds.away_team, eventOdds.home_team));
+    let scrapedMatch = betmgmScrapeByMatchup.get(matchupKey(eventOdds.away_team, eventOdds.home_team));
+    if (!scrapedMatch) {
+      scrapedMatch = scrapedBetmgmEvents.find(scraped =>
+        teamsRoughlyMatch(scraped.away_team, eventOdds.away_team) &&
+        teamsRoughlyMatch(scraped.home_team, eventOdds.home_team)
+      );
+      if (scrapedMatch) {
+        log(`Matched co.betmgm scrape via fuzzy team names for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
+      }
+    }
     if (scrapedMatch?.bookmakers?.length) {
       eventOdds.bookmakers = [...eventOdds.bookmakers, ...scrapedMatch.bookmakers];
       log(`Added co.betmgm scraped odds for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
