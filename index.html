@@ -377,7 +377,7 @@
       <div class="config-grid">
         <div class="field">
           <label>Odds API Key</label>
-          <input type="password" id="cfg-odds-key" value="91ec431ed0b88f3d8e48b719db1ae368" autocomplete="off" readonly>
+          <input type="password" id="cfg-odds-key" value="e623af1dfef2189972eb71b0a7ebd797" autocomplete="off" readonly>
         </div>
         <div class="field">
           <label>Pushover User Key</label>
@@ -497,12 +497,20 @@ let sessionAlerts = 0;
 let sessionReqs = 0;
 let lastAlertedKeys = new Set();
 const CLOUDFLARE_WORKER_URL = 'https://super-art-7372.treymoslof22.workers.dev/';
-const ODDS_API_KEY = '91ec431ed0b88f3d8e48b719db1ae368';
+const ODDS_API_KEY = 'e623af1dfef2189972eb71b0a7ebd797';
 const PUSHOVER_APP_TOKEN = 'az6pk9ipdjj11rqkz7x1kfi28f9ppk';
 const PUSHOVER_USER_KEY = 'u8s29a84uwrrtidoieqj1izetdeq59';
 const TRACKED_BOOKMAKERS = ['fanduel', 'draftkings'];
 const SCRAPE_FALLBACK_BOOKMAKERS = ['fanduel', 'draftkings'];
 const HR_MARKET_KEYS = ['batter_home_runs', 'batter_home_runs_alternate'];
+const HOME_RUN_MARKET_PATTERNS = [
+  /\bto\s+hit\s+a?\s*home\s*run\b/i,
+  /\bto\s+homer\b/i,
+  /\banytime\s+home\s*run\b/i,
+  /\bhome\s*runs?\b/i,
+  /\bbatter[_\s-]*home[_\s-]*runs?\b/i,
+  /\bplayer\s+home\s*runs?\b/i
+];
 
 function normalizeBookKey(book) {
   const raw = `${book?.key || ''} ${book?.title || ''}`.toLowerCase();
@@ -522,6 +530,17 @@ function matchupKey(awayTeam, homeTeam) {
   return `${(awayTeam || '').toLowerCase().trim()}@@${(homeTeam || '').toLowerCase().trim()}`;
 }
 
+function normalizeTeamName(name) {
+  return (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function teamsRoughlyMatch(a, b) {
+  const na = normalizeTeamName(a);
+  const nb = normalizeTeamName(b);
+  if (!na || !nb) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+
 function isSingleHomeRunOutcome(outcome) {
   const point = parseFloat(outcome?.point);
   if (Number.isFinite(point)) return point <= 0.5;
@@ -530,6 +549,34 @@ function isSingleHomeRunOutcome(outcome) {
   if (/\b[2-9]\+\b/.test(text)) return false;
   if (/(over|under)\s*[1-9]\.5/.test(text)) return false;
   return true;
+}
+
+function isHomeRunMarket(market) {
+  const key = `${market?.key || ''}`.toLowerCase();
+  if (HR_MARKET_KEYS.includes(key)) return true;
+
+  const text = `${market?.key || ''} ${market?.title || ''} ${market?.name || ''} ${market?.description || ''} ${market?.label || ''} ${market?.marketName || ''} ${market?.market_name || ''} ${market?.type || ''}`.toLowerCase();
+  if (!text) return false;
+  if (/\bteam\s+home\s*runs?\b/.test(text)) return false;
+
+  return HOME_RUN_MARKET_PATTERNS.some(re => re.test(text));
+}
+
+function parseAmericanPrice(outcome) {
+  const candidates = [
+    outcome?.price,
+    outcome?.odds,
+    outcome?.americanOdds,
+    outcome?.american_odds,
+    outcome?.line,
+    outcome?.value
+  ];
+  for (const raw of candidates) {
+    if (raw === null || raw === undefined || raw === '') continue;
+    const num = parseFloat(`${raw}`.replace(/[^0-9+\-.]/g, ''));
+    if (Number.isFinite(num)) return num;
+  }
+  return NaN;
 }
 
 function cfg(id) { return document.getElementById(id).value.trim(); }
@@ -610,16 +657,14 @@ async function fetchBetmgmColoradoScrape() {
   const workerUrl = cfg('cfg-worker-url') || CLOUDFLARE_WORKER_URL;
   if (!workerUrl) return [];
 
-  const url = new URL(workerUrl);
-  url.searchParams.set('action', 'scrape_betmgm_co_hr');
+  const actionCandidates = [
+    'scrape_betmgm_co_hr',
+    'scrape_betmgm_co',
+    'scrape_betmgm_hr',
+    'scrape_betmgm'
+  ];
 
-  try {
-    const res = await fetch(url.toString());
-    if (!res.ok) return [];
-    const payload = await res.json();
-    const events = Array.isArray(payload?.events) ? payload.events : [];
-
-    return events
+  const normalizeScrapedEvents = (events = []) => events
       .map(event => ({
         id: event.id || `${event.away_team || 'away'}-${event.home_team || 'home'}`,
         away_team: event.away_team,
@@ -630,60 +675,179 @@ async function fetchBetmgmColoradoScrape() {
             key: 'betmgm',
             title: book.title || 'BetMGM Colorado',
             markets: (book.markets || [])
-              .filter(m => HR_MARKET_KEYS.includes(m?.key))
               .map(m => ({
-                key: m.key,
+                key: m.key || m.market_key || m.marketKey || m.name || m.title || 'home_runs',
                 outcomes: (m.outcomes || []).map(o => ({
-                  name: o.name,
-                  description: o.description,
-                  participant: o.participant,
+                  name: o.name || o.label || o.outcome || '',
+                  description: o.description || o.player || o.participant || '',
+                  participant: o.participant || o.player || o.description || '',
                   point: Number.isFinite(parseFloat(o.point)) ? parseFloat(o.point) : null,
-                  price: parseFloat(o.price)
+                  price: parseAmericanPrice(o)
                 })).filter(o => Number.isFinite(o.price) && isSingleHomeRunOutcome(o))
               }))
-              .filter(m => m.outcomes.length > 0)
+              .filter(m => isHomeRunMarket(m) && m.outcomes.length > 0)
           }))
       }))
       .filter(event => event.bookmakers.length > 0);
+
+  const parsePayloadEvents = (payload) => Array.isArray(payload?.events)
+    ? payload.events
+    : Array.isArray(payload?.data)
+      ? payload.data
+      : Array.isArray(payload)
+        ? payload
+        : [];
+
+  const fetchWorkerPayloads = async (action) => {
+    const attempts = [];
+    const getUrl = new URL(workerUrl);
+    getUrl.searchParams.set('action', action);
+    attempts.push({ label: `GET ?action=${action}`, url: getUrl.toString(), init: { method: 'GET' } });
+    attempts.push({
+      label: `POST JSON action=${action}`,
+      url: workerUrl,
+      init: {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
+      }
+    });
+    attempts.push({
+      label: `POST FORM action=${action}`,
+      url: workerUrl,
+      init: {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ action }).toString()
+      }
+    });
+
+    const payloads = [];
+    for (const attempt of attempts) {
+      try {
+        const res = await fetch(attempt.url, attempt.init);
+        const rawText = await res.text();
+        if (!res.ok) {
+          log(`co.betmgm scrape request failed [${attempt.label}] status=${res.status}. Body: ${(rawText || '').slice(0, 180)}`, 'error');
+          continue;
+        }
+        try {
+          payloads.push(JSON.parse(rawText));
+        } catch (jsonErr) {
+          log(`co.betmgm scrape JSON parse failed [${attempt.label}]: ${jsonErr.message}. Body: ${(rawText || '').slice(0, 180)}`, 'error');
+        }
+      } catch (reqErr) {
+        log(`co.betmgm scrape request error [${attempt.label}]: ${reqErr.message}`, 'error');
+      }
+    }
+    return payloads;
+  };
+
+  try {
+    for (const action of actionCandidates) {
+      const payloads = await fetchWorkerPayloads(action);
+      for (const payload of payloads) {
+        const events = parsePayloadEvents(payload);
+        const normalized = normalizeScrapedEvents(events);
+        if (normalized.length > 0) {
+          log(`Loaded co.betmgm scrape using worker action: ${action}.`, 'info');
+          return normalized;
+        }
+        const payloadError = payload?.error || payload?.message || payload?.code || payload?.statusText || '';
+        if (payloadError || events.length === 0) {
+          log(`co.betmgm action ${action} returned no usable events. code/message: ${payloadError || 'none'}. rawEvents=${events.length}.`, 'error');
+        }
+      }
+    }
+    return [];
   } catch (e) {
     log(`BetMGM CO scrape failed: ${e.message}`, 'error');
     return [];
   }
 }
 
-async function fetchScrapedBookmakerFallback(eventId) {
+async function fetchScrapedBookmakerFallback(eventId, requestedBooks = SCRAPE_FALLBACK_BOOKMAKERS) {
   const workerUrl = cfg('cfg-worker-url') || CLOUDFLARE_WORKER_URL;
   if (!workerUrl) return [];
 
-  const url = new URL(workerUrl);
-  url.searchParams.set('action', 'scrape_hr_props');
-  url.searchParams.set('eventId', eventId);
-  url.searchParams.set('books', SCRAPE_FALLBACK_BOOKMAKERS.join(','));
-
   try {
-    const res = await fetch(url.toString());
-    if (!res.ok) return [];
-    const payload = await res.json();
-    const books = Array.isArray(payload?.bookmakers) ? payload.bookmakers : [];
+    const url = new URL(workerUrl);
+    url.searchParams.set('action', 'scrape_hr_props');
+    url.searchParams.set('eventId', eventId);
+    url.searchParams.set('books', requestedBooks.join(','));
+
+    const requests = [
+      {
+        label: `GET scrape_hr_props event=${eventId}`,
+        url: url.toString(),
+        init: { method: 'GET' }
+      },
+      {
+        label: `POST JSON scrape_hr_props event=${eventId}`,
+        url: workerUrl,
+        init: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'scrape_hr_props', eventId, books: requestedBooks.join(',') })
+        }
+      },
+      {
+        label: `POST FORM scrape_hr_props event=${eventId}`,
+        url: workerUrl,
+        init: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ action: 'scrape_hr_props', eventId, books: requestedBooks.join(',') }).toString()
+        }
+      }
+    ];
+
+    let books = [];
+    for (const req of requests) {
+      try {
+        const res = await fetch(req.url, req.init);
+        const rawText = await res.text();
+        if (!res.ok) {
+          log(`scrape_hr_props request failed [${req.label}] status=${res.status}. Body: ${(rawText || '').slice(0, 180)}`, 'error');
+          continue;
+        }
+        let payload = {};
+        try {
+          payload = JSON.parse(rawText);
+        } catch (jsonErr) {
+          log(`scrape_hr_props JSON parse failed [${req.label}]: ${jsonErr.message}. Body: ${(rawText || '').slice(0, 180)}`, 'error');
+          continue;
+        }
+        books = Array.isArray(payload?.bookmakers) ? payload.bookmakers : [];
+        if (!books.length) {
+          const payloadError = payload?.error || payload?.message || payload?.code || payload?.statusText || '';
+          log(`scrape_hr_props returned 0 books [${req.label}] for books=${requestedBooks.join(',')}. code/message: ${payloadError || 'none'}.`, 'error');
+        }
+        if (books.length > 0) break;
+      } catch (reqErr) {
+        log(`scrape_hr_props request error [${req.label}]: ${reqErr.message}`, 'error');
+      }
+    }
+    if (!books.length) return [];
+    const requestedBookKeys = new Set(requestedBooks.map(book => normalizeBookKey({ key: book, title: book })));
 
     return books
-      .filter(book => SCRAPE_FALLBACK_BOOKMAKERS.includes(normalizeBookKey(book)))
+      .filter(book => requestedBookKeys.has(normalizeBookKey(book)))
       .map(book => ({
         key: normalizeBookKey(book),
         title: book.title || book.key,
         markets: (book.markets || [])
-          .filter(m => HR_MARKET_KEYS.includes(m?.key))
           .map(m => ({
-            key: m.key,
+            key: m.key || m.market_key || m.marketKey || m.name || m.title || 'home_runs',
             outcomes: (m.outcomes || []).map(o => ({
-              name: o.name,
-              description: o.description,
-              participant: o.participant,
+              name: o.name || o.label || o.outcome || '',
+              description: o.description || o.player || o.participant || '',
+              participant: o.participant || o.player || o.description || '',
               point: Number.isFinite(parseFloat(o.point)) ? parseFloat(o.point) : null,
-              price: parseFloat(o.price)
+              price: parseAmericanPrice(o)
             })).filter(o => Number.isFinite(o.price) && isSingleHomeRunOutcome(o))
           }))
-          .filter(m => m.outcomes.length > 0)
+          .filter(m => isHomeRunMarket(m) && m.outcomes.length > 0)
       }))
       .filter(book => book.markets.length > 0);
   } catch (e) {
@@ -719,7 +883,7 @@ async function fetchHROdds() {
   const eventOddsPayloads = [];
 
   for (const event of events) {
-    const eventOddsUrl = `https://api.the-odds-api.com/v4/sports/${sport}/events/${event.id}/odds/?apiKey=${key}&regions=${region}&markets=${market}&oddsFormat=${oddsFormat}&bookmakers=fanduel,draftkings`;
+    const eventOddsUrl = `https://api.the-odds-api.com/v4/sports/${sport}/events/${event.id}/odds/?apiKey=${key}&regions=${region}&markets=${market}&oddsFormat=${oddsFormat}&bookmakers=fanduel,draftkings,betmgm`;
     const eventOddsRes = await fetchWithRateLimitRetry(eventOddsUrl, `event ${event.id}`);
 
     sessionReqs++;
@@ -730,13 +894,38 @@ async function fetchHROdds() {
     }
 
     const eventOdds = await eventOddsRes.json();
-    const nonBetmgmApiBooks = (eventOdds.bookmakers || []).filter(b => normalizeBookKey(b) !== 'betmgm');
-    eventOdds.bookmakers = nonBetmgmApiBooks.filter(isTrackedBook);
+    const apiBooks = eventOdds.bookmakers || [];
+    const apiBetmgmBook = apiBooks.find(b => normalizeBookKey(b) === 'betmgm');
+    const trackedApiBooks = apiBooks.filter(book => normalizeBookKey(book) !== 'betmgm' && isTrackedBook(book));
+    eventOdds.bookmakers = [...trackedApiBooks];
 
-    const scrapedMatch = betmgmScrapeByMatchup.get(matchupKey(eventOdds.away_team, eventOdds.home_team));
+    let scrapedMatch = betmgmScrapeByMatchup.get(matchupKey(eventOdds.away_team, eventOdds.home_team));
+    if (!scrapedMatch) {
+      scrapedMatch = scrapedBetmgmEvents.find(scraped =>
+        (
+          teamsRoughlyMatch(scraped.away_team, eventOdds.away_team) &&
+          teamsRoughlyMatch(scraped.home_team, eventOdds.home_team)
+        ) || (
+          teamsRoughlyMatch(scraped.away_team, eventOdds.home_team) &&
+          teamsRoughlyMatch(scraped.home_team, eventOdds.away_team)
+        )
+      );
+      if (scrapedMatch) {
+        log(`Matched co.betmgm scrape via fuzzy team names for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
+      }
+    }
     if (scrapedMatch?.bookmakers?.length) {
       eventOdds.bookmakers = [...eventOdds.bookmakers, ...scrapedMatch.bookmakers];
-      log(`Added co.betmgm scraped odds for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
+      log(`Using co.betmgm scraped odds for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
+    } else {
+      const scrapedBetmgmFallback = await fetchScrapedBookmakerFallback(event.id, ['betmgm', 'co.betmgm', 'betmgm_co']);
+      if (scrapedBetmgmFallback.length > 0) {
+        eventOdds.bookmakers = [...eventOdds.bookmakers, ...scrapedBetmgmFallback];
+        log(`Using scrape_hr_props BetMGM fallback for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
+      } else if (apiBetmgmBook) {
+        eventOdds.bookmakers.push(apiBetmgmBook);
+        log(`co.betmgm scrape unavailable; using Odds API BetMGM for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
+      }
     }
 
     const missingFallbackBooks = SCRAPE_FALLBACK_BOOKMAKERS.filter(bookKey =>
@@ -755,6 +944,15 @@ async function fetchHROdds() {
     }
 
     await sleep(120);
+  }
+
+  if (scrapedBetmgmEvents.length > 0) {
+    const existingMatchups = new Set(eventOddsPayloads.map(e => matchupKey(e.away_team, e.home_team)));
+    const unmatchedScraped = scrapedBetmgmEvents.filter(e => !existingMatchups.has(matchupKey(e.away_team, e.home_team)));
+    if (unmatchedScraped.length > 0) {
+      eventOddsPayloads.push(...unmatchedScraped);
+      log(`Added ${unmatchedScraped.length} unmatched co.betmgm scraped event(s) directly.`, 'info');
+    }
   }
 
   if (eventOddsPayloads.length === 0 && scrapedBetmgmEvents.length > 0) {
@@ -909,7 +1107,7 @@ async function runScan() {
       b.key !== 'betmgm' && !b.title?.toLowerCase().includes('betmgm')
     ) || [];
     
-    const hrMarketsBetMGM = betmgmBook.markets?.filter(m => HR_MARKET_KEYS.includes(m.key)) || [];
+    const hrMarketsBetMGM = betmgmBook.markets?.filter(isHomeRunMarket) || [];
     if (!hrMarketsBetMGM.length) continue;
     
     for (const outcome of hrMarketsBetMGM.flatMap(m => m.outcomes || []).filter(isSingleHomeRunOutcome)) {
@@ -930,7 +1128,7 @@ async function runScan() {
       const marketProbs = [];
       for (const book of otherBooks) {
         const candidateOutcomes = (book.markets || [])
-          .filter(m => HR_MARKET_KEYS.includes(m.key))
+          .filter(isHomeRunMarket)
           .flatMap(m => m.outcomes || [])
           .filter(isSingleHomeRunOutcome);
         if (!candidateOutcomes.length) continue;
