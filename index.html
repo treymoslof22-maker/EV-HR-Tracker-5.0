@@ -496,6 +496,8 @@ let sessionEvCount = 0;
 let sessionAlerts = 0;
 let sessionReqs = 0;
 let lastAlertedKeys = new Set();
+let lastBetmgmScrapeDiag = '';
+let lastScrapeHrPropsDiag = '';
 const CLOUDFLARE_WORKER_URL = 'https://super-art-7372.treymoslof22.workers.dev/';
 const ODDS_API_KEY = 'e623af1dfef2189972eb71b0a7ebd797';
 const PUSHOVER_APP_TOKEN = 'az6pk9ipdjj11rqkz7x1kfi28f9ppk';
@@ -699,6 +701,7 @@ async function fetchBetmgmColoradoScrape() {
         : [];
 
   const fetchWorkerPayloads = async (action) => {
+    const diag = [];
     const attempts = [];
     const getUrl = new URL(workerUrl);
     getUrl.searchParams.set('action', action);
@@ -728,17 +731,23 @@ async function fetchBetmgmColoradoScrape() {
         const res = await fetch(attempt.url, attempt.init);
         const rawText = await res.text();
         if (!res.ok) {
+          diag.push(`${attempt.label}:HTTP${res.status}`);
           log(`co.betmgm scrape request failed [${attempt.label}] status=${res.status}. Body: ${(rawText || '').slice(0, 180)}`, 'error');
           continue;
         }
         try {
           payloads.push(JSON.parse(rawText));
         } catch (jsonErr) {
+          diag.push(`${attempt.label}:JSON_PARSE`);
           log(`co.betmgm scrape JSON parse failed [${attempt.label}]: ${jsonErr.message}. Body: ${(rawText || '').slice(0, 180)}`, 'error');
         }
       } catch (reqErr) {
+        diag.push(`${attempt.label}:ERR:${reqErr.message}`);
         log(`co.betmgm scrape request error [${attempt.label}]: ${reqErr.message}`, 'error');
       }
+    }
+    if (diag.length > 0) {
+      lastBetmgmScrapeDiag = `action=${action} :: ${diag.join(' | ')}`.slice(0, 260);
     }
     return payloads;
   };
@@ -751,16 +760,20 @@ async function fetchBetmgmColoradoScrape() {
         const normalized = normalizeScrapedEvents(events);
         if (normalized.length > 0) {
           log(`Loaded co.betmgm scrape using worker action: ${action}.`, 'info');
+          lastBetmgmScrapeDiag = `success via ${action}`;
           return normalized;
         }
         const payloadError = payload?.error || payload?.message || payload?.code || payload?.statusText || '';
         if (payloadError || events.length === 0) {
+          lastBetmgmScrapeDiag = `action=${action} empty events=${events.length} payload=${payloadError || 'none'}`.slice(0, 260);
           log(`co.betmgm action ${action} returned no usable events. code/message: ${payloadError || 'none'}. rawEvents=${events.length}.`, 'error');
         }
       }
     }
+    if (!lastBetmgmScrapeDiag) lastBetmgmScrapeDiag = 'all actions returned empty';
     return [];
   } catch (e) {
+    lastBetmgmScrapeDiag = `exception: ${e.message}`.slice(0, 260);
     log(`BetMGM CO scrape failed: ${e.message}`, 'error');
     return [];
   }
@@ -803,11 +816,13 @@ async function fetchScrapedBookmakerFallback(eventId, requestedBooks = SCRAPE_FA
     ];
 
     let books = [];
+    const diag = [];
     for (const req of requests) {
       try {
         const res = await fetch(req.url, req.init);
         const rawText = await res.text();
         if (!res.ok) {
+          diag.push(`${req.label}:HTTP${res.status}`);
           log(`scrape_hr_props request failed [${req.label}] status=${res.status}. Body: ${(rawText || '').slice(0, 180)}`, 'error');
           continue;
         }
@@ -815,20 +830,27 @@ async function fetchScrapedBookmakerFallback(eventId, requestedBooks = SCRAPE_FA
         try {
           payload = JSON.parse(rawText);
         } catch (jsonErr) {
+          diag.push(`${req.label}:JSON_PARSE`);
           log(`scrape_hr_props JSON parse failed [${req.label}]: ${jsonErr.message}. Body: ${(rawText || '').slice(0, 180)}`, 'error');
           continue;
         }
         books = Array.isArray(payload?.bookmakers) ? payload.bookmakers : [];
         if (!books.length) {
           const payloadError = payload?.error || payload?.message || payload?.code || payload?.statusText || '';
+          diag.push(`${req.label}:EMPTY:${payloadError || 'none'}`);
           log(`scrape_hr_props returned 0 books [${req.label}] for books=${requestedBooks.join(',')}. code/message: ${payloadError || 'none'}.`, 'error');
         }
         if (books.length > 0) break;
       } catch (reqErr) {
+        diag.push(`${req.label}:ERR:${reqErr.message}`);
         log(`scrape_hr_props request error [${req.label}]: ${reqErr.message}`, 'error');
       }
     }
-    if (!books.length) return [];
+    if (!books.length) {
+      lastScrapeHrPropsDiag = `event=${eventId} books=${requestedBooks.join(',')} :: ${diag.join(' | ') || 'no response'}`.slice(0, 260);
+      return [];
+    }
+    lastScrapeHrPropsDiag = `event=${eventId} books=${requestedBooks.join(',')} :: success`;
     const requestedBookKeys = new Set(requestedBooks.map(book => normalizeBookKey({ key: book, title: book })));
 
     return books
@@ -895,8 +917,7 @@ async function fetchHROdds() {
 
     const eventOdds = await eventOddsRes.json();
     const apiBooks = eventOdds.bookmakers || [];
-    const apiBetmgmBook = apiBooks.find(b => normalizeBookKey(b) === 'betmgm');
-    const trackedApiBooks = apiBooks.filter(book => normalizeBookKey(book) !== 'betmgm' && isTrackedBook(book));
+    const trackedApiBooks = apiBooks.filter(isTrackedBook);
     eventOdds.bookmakers = [...trackedApiBooks];
 
     let scrapedMatch = betmgmScrapeByMatchup.get(matchupKey(eventOdds.away_team, eventOdds.home_team));
@@ -922,9 +943,9 @@ async function fetchHROdds() {
       if (scrapedBetmgmFallback.length > 0) {
         eventOdds.bookmakers = [...eventOdds.bookmakers, ...scrapedBetmgmFallback];
         log(`Using scrape_hr_props BetMGM fallback for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
-      } else if (apiBetmgmBook) {
-        eventOdds.bookmakers.push(apiBetmgmBook);
-        log(`co.betmgm scrape unavailable; using Odds API BetMGM for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
+      } else {
+        const detail = [lastBetmgmScrapeDiag, lastScrapeHrPropsDiag].filter(Boolean).join(' || ') || 'no diagnostics captured';
+        log(`co.betmgm scrape unavailable; no BetMGM lines added for ${eventOdds.away_team} @ ${eventOdds.home_team}. Detail: ${detail}`, 'error');
       }
     }
 
