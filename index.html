@@ -377,7 +377,7 @@
       <div class="config-grid">
         <div class="field">
           <label>Odds API Key</label>
-          <input type="password" id="cfg-odds-key" value="91ec431ed0b88f3d8e48b719db1ae368" autocomplete="off" readonly>
+          <input type="password" id="cfg-odds-key" value="e623af1dfef2189972eb71b0a7ebd797" autocomplete="off" readonly>
         </div>
         <div class="field">
           <label>Pushover User Key</label>
@@ -497,7 +497,7 @@ let sessionAlerts = 0;
 let sessionReqs = 0;
 let lastAlertedKeys = new Set();
 const CLOUDFLARE_WORKER_URL = 'https://super-art-7372.treymoslof22.workers.dev/';
-const ODDS_API_KEY = '91ec431ed0b88f3d8e48b719db1ae368';
+const ODDS_API_KEY = 'e623af1dfef2189972eb71b0a7ebd797';
 const PUSHOVER_APP_TOKEN = 'az6pk9ipdjj11rqkz7x1kfi28f9ppk';
 const PUSHOVER_USER_KEY = 'u8s29a84uwrrtidoieqj1izetdeq59';
 const TRACKED_BOOKMAKERS = ['fanduel', 'draftkings'];
@@ -520,6 +520,17 @@ function isTrackedBook(book) {
 
 function matchupKey(awayTeam, homeTeam) {
   return `${(awayTeam || '').toLowerCase().trim()}@@${(homeTeam || '').toLowerCase().trim()}`;
+}
+
+function normalizeTeamName(name) {
+  return (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function teamsRoughlyMatch(a, b) {
+  const na = normalizeTeamName(a);
+  const nb = normalizeTeamName(b);
+  if (!na || !nb) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
 }
 
 function isSingleHomeRunOutcome(outcome) {
@@ -733,7 +744,16 @@ async function fetchHROdds() {
     const nonBetmgmApiBooks = (eventOdds.bookmakers || []).filter(b => normalizeBookKey(b) !== 'betmgm');
     eventOdds.bookmakers = nonBetmgmApiBooks.filter(isTrackedBook);
 
-    const scrapedMatch = betmgmScrapeByMatchup.get(matchupKey(eventOdds.away_team, eventOdds.home_team));
+    let scrapedMatch = betmgmScrapeByMatchup.get(matchupKey(eventOdds.away_team, eventOdds.home_team));
+    if (!scrapedMatch) {
+      scrapedMatch = scrapedBetmgmEvents.find(scraped =>
+        teamsRoughlyMatch(scraped.away_team, eventOdds.away_team) &&
+        teamsRoughlyMatch(scraped.home_team, eventOdds.home_team)
+      );
+      if (scrapedMatch) {
+        log(`Matched co.betmgm scrape via fuzzy team names for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
+      }
+    }
     if (scrapedMatch?.bookmakers?.length) {
       eventOdds.bookmakers = [...eventOdds.bookmakers, ...scrapedMatch.bookmakers];
       log(`Added co.betmgm scraped odds for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
