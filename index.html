@@ -498,6 +498,7 @@ let sessionReqs = 0;
 let lastAlertedKeys = new Set();
 let lastBetmgmScrapeDiag = '';
 let lastScrapeHrPropsDiag = '';
+let scrapeWorkerMisconfigured = false;
 const CLOUDFLARE_WORKER_URL = 'https://super-art-7372.treymoslof22.workers.dev/';
 const ODDS_API_KEY = 'e623af1dfef2189972eb71b0a7ebd797';
 const PUSHOVER_APP_TOKEN = 'az6pk9ipdjj11rqkz7x1kfi28f9ppk';
@@ -551,6 +552,11 @@ function isSingleHomeRunOutcome(outcome) {
   if (/\b[2-9]\+\b/.test(text)) return false;
   if (/(over|under)\s*[1-9]\.5/.test(text)) return false;
   return true;
+}
+
+function isPushoverTokenError(text = '') {
+  const normalized = `${text || ''}`.toLowerCase();
+  return normalized.includes('application token must be supplied') || normalized.includes('"token":"invalid"');
 }
 
 function isHomeRunMarket(market) {
@@ -656,6 +662,7 @@ async function fetchWithRateLimitRetry(url, contextLabel, maxAttempts = 4) {
 }
 
 async function fetchBetmgmColoradoScrape() {
+  scrapeWorkerMisconfigured = false;
   const workerUrl = cfg('cfg-worker-url') || CLOUDFLARE_WORKER_URL;
   if (!workerUrl) return [];
 
@@ -731,6 +738,12 @@ async function fetchBetmgmColoradoScrape() {
         const res = await fetch(attempt.url, attempt.init);
         const rawText = await res.text();
         if (!res.ok) {
+          if (res.status === 400 && isPushoverTokenError(rawText)) {
+            scrapeWorkerMisconfigured = true;
+            lastBetmgmScrapeDiag = 'worker appears to be a Pushover-only endpoint (token required)';
+            log('Scrape worker misconfigured: endpoint is returning Pushover token errors for scrape actions. Configure a dedicated scrape worker URL.', 'error');
+            return [];
+          }
           diag.push(`${attempt.label}:HTTP${res.status}`);
           log(`co.betmgm scrape request failed [${attempt.label}] status=${res.status}. Body: ${(rawText || '').slice(0, 180)}`, 'error');
           continue;
@@ -780,6 +793,7 @@ async function fetchBetmgmColoradoScrape() {
 }
 
 async function fetchScrapedBookmakerFallback(eventId, requestedBooks = SCRAPE_FALLBACK_BOOKMAKERS) {
+  if (scrapeWorkerMisconfigured) return [];
   const workerUrl = cfg('cfg-worker-url') || CLOUDFLARE_WORKER_URL;
   if (!workerUrl) return [];
 
@@ -822,6 +836,12 @@ async function fetchScrapedBookmakerFallback(eventId, requestedBooks = SCRAPE_FA
         const res = await fetch(req.url, req.init);
         const rawText = await res.text();
         if (!res.ok) {
+          if (res.status === 400 && isPushoverTokenError(rawText)) {
+            scrapeWorkerMisconfigured = true;
+            lastScrapeHrPropsDiag = 'worker appears to be a Pushover-only endpoint (token required)';
+            log('scrape_hr_props blocked: worker URL is returning Pushover token errors. Set cfg-worker-url to your scraping worker.', 'error');
+            return [];
+          }
           diag.push(`${req.label}:HTTP${res.status}`);
           log(`scrape_hr_props request failed [${req.label}] status=${res.status}. Body: ${(rawText || '').slice(0, 180)}`, 'error');
           continue;
@@ -881,6 +901,7 @@ async function fetchScrapedBookmakerFallback(eventId, requestedBooks = SCRAPE_FA
 async function fetchHROdds() {
   const key = ODDS_API_KEY;
   const scrapedBetmgmEvents = await fetchBetmgmColoradoScrape();
+  let loggedMisconfiguredWorker = false;
   const betmgmScrapeByMatchup = new Map(
     scrapedBetmgmEvents.map(event => [matchupKey(event.away_team, event.home_team), event])
   );
@@ -945,7 +966,14 @@ async function fetchHROdds() {
         log(`Using scrape_hr_props BetMGM fallback for ${eventOdds.away_team} @ ${eventOdds.home_team}.`, 'info');
       } else {
         const detail = [lastBetmgmScrapeDiag, lastScrapeHrPropsDiag].filter(Boolean).join(' || ') || 'no diagnostics captured';
-        log(`co.betmgm scrape unavailable; no BetMGM lines added for ${eventOdds.away_team} @ ${eventOdds.home_team}. Detail: ${detail}`, 'error');
+        if (scrapeWorkerMisconfigured) {
+          if (!loggedMisconfiguredWorker) {
+            log(`co.betmgm scrape disabled due to worker misconfiguration. Detail: ${detail}`, 'error');
+            loggedMisconfiguredWorker = true;
+          }
+        } else {
+          log(`co.betmgm scrape unavailable; no BetMGM lines added for ${eventOdds.away_team} @ ${eventOdds.home_team}. Detail: ${detail}`, 'error');
+        }
       }
     }
 
