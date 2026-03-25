@@ -926,7 +926,7 @@ async function fetchHROdds() {
   const eventOddsPayloads = [];
 
   for (const event of events) {
-    const eventOddsUrl = `https://api.the-odds-api.com/v4/sports/${sport}/events/${event.id}/odds/?apiKey=${key}&regions=${region}&markets=${market}&oddsFormat=${oddsFormat}&bookmakers=fanduel,draftkings`;
+    const eventOddsUrl = `https://api.the-odds-api.com/v4/sports/${sport}/events/${event.id}/odds/?apiKey=${key}&regions=${region}&markets=${market}&oddsFormat=${oddsFormat}&bookmakers=fanduel,draftkings,betmgm`;
     const eventOddsRes = await fetchWithRateLimitRetry(eventOddsUrl, `event ${event.id}`);
 
     sessionReqs++;
